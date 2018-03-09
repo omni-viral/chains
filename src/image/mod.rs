@@ -1,82 +1,66 @@
+use hal::image::{Access as ImageAccess, ImageLayout};
+use hal::pso::PipelineStage;
 
+use resource::{Access, Layout};
 
-/// Chain id for images.
-pub type ImageChainId = ChainId<(ImageState, ImageUsage)>;
-
-// `Link` type for images.
-pub type ImageLink = Link<ImageState, ImageUsage>;
-
-/// `Chain` type for images.
-pub type ImageChain<S, W> = Chain<ImageState, ImageUsage, ImageInit, S, W>;
-
-
-
-/// Methods specific for image chains.
-impl<S, W> ImageChain<S, W> {
-    /// Setup additional synchronization for presentable attachment
-    pub fn with_presentable_sync(&mut self, acquire: W, from: ImageLayout, release: S, to: ImageLayout) {
-        let link = self.first_mut();
-        match link.acquire {
-            LinkSync::None(Acquire) => {},
-            _ => panic!("First link is already synchronized with something"),
-        }
-        link.acquire = LinkSync::Transfer {
-            queue: link.queue,
-            semaphore: acquire,
-            states: (ImageAccess::empty(), from) .. link.state,
-            stages: PipelineStage::BOTTOM_OF_PIPE .. link.stages,
-        };
-        let link = self.last_mut();
-        match link.release {
-            LinkSync::None(Release) => {},
-            _ => panic!("Last link is already synchronized with something"),
-        }
-        link.release = LinkSync::Transfer {
-            queue: link.queue,
-            semaphore: release,
-            states: link.state .. (ImageAccess::empty(), to),
-            stages: link.stages .. PipelineStage::TOP_OF_PIPE,
-        };
+impl Access for ImageAccess {
+    fn none() -> Self {
+        Self::empty()
+    }
+    fn all() -> Self {
+        Self::all()
+    }
+    fn is_write(&self) -> bool {
+        self.contains(Self::COLOR_ATTACHMENT_WRITE)
+            || self.contains(Self::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            || self.contains(Self::TRANSFER_WRITE) || self.contains(Self::SHADER_WRITE)
+            || self.contains(Self::HOST_WRITE) || self.contains(Self::MEMORY_WRITE)
     }
 
-    /// Load operation for attachment used in render-pass
-    pub fn load_op(&self, index: usize) -> AttachmentLoadOp {
-        if self.link(index).state.0.is_read() {
-            AttachmentLoadOp::Load
-        } else {
-            self.init.load_op()
-        }
+    fn is_read(&self) -> bool {
+        self.contains(Self::COLOR_ATTACHMENT_READ)
+            || self.contains(Self::DEPTH_STENCIL_ATTACHMENT_READ)
+            || self.contains(Self::TRANSFER_READ) || self.contains(Self::SHADER_READ)
+            || self.contains(Self::HOST_READ) || self.contains(Self::MEMORY_READ)
+            || self.contains(Self::INPUT_ATTACHMENT_READ)
     }
 
-    /// Store operation for attachment used in render-pass
-    pub fn store_op(&self, index: usize) -> AttachmentStoreOp {
-        if self.links[index + 1..].iter().filter_map(Option::as_ref).any(|link| link.state.0.is_read()) {
-            return AttachmentStoreOp::Store;
-        } else {
-            AttachmentStoreOp::DontCare
-        }
-    }
+    fn supported_pipeline_stages(&self) -> PipelineStage {
+        type PS = PipelineStage;
 
-    /// 
-    pub fn pass_layout_transition(&self, index: usize) -> Range<ImageLayout> {
-        let ref link = self.link(index);
-        let start = match link.acquire {
-            LinkSync::None(Acquire) | LinkSync::Semaphore { .. } => { link.state.1 },
-            LinkSync::Transfer { states } => {
-                debug_assert_eq!(states.end.1, link.state.1);
-                unimplemented!()
+        match *self {
+            Self::COLOR_ATTACHMENT_READ | Self::COLOR_ATTACHMENT_WRITE => {
+                PS::COLOR_ATTACHMENT_OUTPUT
             }
-        };
-    }
-
-    pub fn subpass_layout(&self, index: usize) -> ImageLayout {
-        self.link(index).state.1
-    }
-
-    pub fn clear_value(&self, index: usize) -> Option<ClearValue> {
-        match self.load_op(index) {
-            AttachmentLoadOp::Clear => self.init.clear_value(),
-            _ => None,
+            Self::TRANSFER_READ | Self::TRANSFER_WRITE => PS::TRANSFER,
+            Self::SHADER_READ | Self::SHADER_WRITE => {
+                PS::VERTEX_SHADER | PS::GEOMETRY_SHADER | PS::FRAGMENT_SHADER | PS::COMPUTE_SHADER
+            }
+            Self::DEPTH_STENCIL_ATTACHMENT_READ | Self::DEPTH_STENCIL_ATTACHMENT_WRITE => {
+                PS::EARLY_FRAGMENT_TESTS | PS::LATE_FRAGMENT_TESTS
+            }
+            Self::HOST_READ | Self::HOST_WRITE => PS::HOST,
+            Self::MEMORY_READ | Self::MEMORY_WRITE => PS::empty(),
+            Self::INPUT_ATTACHMENT_READ => PS::FRAGMENT_SHADER,
+            _ => panic!("Only one bit must be set"),
         }
+    }
+}
+
+impl Layout for ImageLayout {
+    fn merge(self, other: ImageLayout) -> Option<ImageLayout> {
+        match (self, other) {
+            (x, y) if x == y => Some(x),
+            (ImageLayout::Present, _) | (_, ImageLayout::Present) => None,
+            (ImageLayout::ShaderReadOnlyOptimal, ImageLayout::DepthStencilReadOnlyOptimal)
+            | (ImageLayout::DepthStencilReadOnlyOptimal, ImageLayout::ShaderReadOnlyOptimal) => {
+                Some(ImageLayout::DepthStencilReadOnlyOptimal)
+            }
+            (_, _) => Some(ImageLayout::General),
+        }
+    }
+
+    fn discard_content(self) -> Self {
+        ImageLayout::Undefined
     }
 }
